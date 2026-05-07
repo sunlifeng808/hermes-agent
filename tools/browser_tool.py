@@ -1802,28 +1802,37 @@ def _run_browser_command(
         # - Ubuntu 23.10+ / AppArmor systems: unprivileged user namespaces
         #   are restricted, causing Chromium to exit with "No usable sandbox"
         #   even for non-root users running under systemd or containers.
-        if "AGENT_BROWSER_CHROME_FLAGS" not in browser_env:
-            _needs_sandbox_bypass = False
-            if hasattr(os, "geteuid") and os.geteuid() == 0:
-                _needs_sandbox_bypass = True
-                logger.debug("browser: running as root — injecting --no-sandbox")
+        _needs_sandbox_bypass = False
+        if hasattr(os, "geteuid") and os.geteuid() == 0:
+            _needs_sandbox_bypass = True
+            logger.debug("browser: running as root — injecting --no-sandbox")
+        else:
+            # Detect AppArmor user namespace restrictions (Ubuntu 23.10+)
+            _userns_restrict = "/proc/sys/kernel/apparmor_restrict_unprivileged_userns"
+            try:
+                with open(_userns_restrict) as _f:
+                    if _f.read().strip() == "1":
+                        _needs_sandbox_bypass = True
+                        logger.debug(
+                            "browser: AppArmor userns restrictions detected — "
+                            "injecting --no-sandbox"
+                        )
+            except OSError:
+                pass
+        if _needs_sandbox_bypass:
+            # agent-browser exposes Chromium launch flags via its global
+            # ``--args`` option / AGENT_BROWSER_ARGS env var.  Older Hermes
+            # builds used AGENT_BROWSER_CHROME_FLAGS, which agent-browser 0.26
+            # ignores; pass the flag explicitly so Ubuntu 23.10+ AppArmor
+            # userns restrictions do not make local browser launch fail with
+            # "No usable sandbox".
+            existing_args = browser_env.get("AGENT_BROWSER_ARGS", "").strip()
+            needed_args = "--no-sandbox,--disable-dev-shm-usage"
+            if existing_args:
+                if "--no-sandbox" not in existing_args:
+                    browser_env["AGENT_BROWSER_ARGS"] = f"{existing_args},{needed_args}"
             else:
-                # Detect AppArmor user namespace restrictions (Ubuntu 23.10+)
-                _userns_restrict = "/proc/sys/kernel/apparmor_restrict_unprivileged_userns"
-                try:
-                    with open(_userns_restrict) as _f:
-                        if _f.read().strip() == "1":
-                            _needs_sandbox_bypass = True
-                            logger.debug(
-                                "browser: AppArmor userns restrictions detected — "
-                                "injecting --no-sandbox"
-                            )
-                except OSError:
-                    pass
-            if _needs_sandbox_bypass:
-                browser_env["AGENT_BROWSER_CHROME_FLAGS"] = (
-                    "--no-sandbox --disable-dev-shm-usage"
-                )
+                browser_env["AGENT_BROWSER_ARGS"] = needed_args
 
         # Use temp files for stdout/stderr instead of pipes.
         # agent-browser starts a background daemon that inherits file
